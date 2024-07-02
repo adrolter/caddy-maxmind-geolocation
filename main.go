@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Interface guards
@@ -92,6 +93,9 @@ type MaxmindGeolocation struct {
 	// You can specify the special value "UNK" to match unrecognized ASNs.
 	DenyASN []string `json:"deny_asn"`
 
+	// Use x-real-ip as remote ip
+	RealIP bool `json:"use_x_real_ip,omitempty"`
+
 	dbInst *maxminddb.Reader
 	logger *zap.Logger
 }
@@ -145,6 +149,8 @@ func (m *MaxmindGeolocation) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				current = 8
 			case "deny_asn":
 				current = 9
+			case "use_x_real_ip":
+				m.RealIP = true
 			default:
 				switch current {
 				case 1:
@@ -238,14 +244,19 @@ func (m *MaxmindGeolocation) checkAllowed(item string, allowedList []string, den
 
 func (m *MaxmindGeolocation) Match(r *http.Request) bool {
 	remoteIp, _, err := net.SplitHostPort(r.RemoteAddr)
+	if m.RealIP {
+		if realIp := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIp != "" {
+			remoteIp = realIp
+		}
+	}
 	if err != nil {
-		m.logger.Warn("cannot split IP address", zap.String("address", r.RemoteAddr), zap.Error(err))
+		m.logger.Warn("cannot split IP address", zap.String("address", remoteIp), zap.Error(err))
 	}
 
 	// Get the record from the database
 	addr := net.ParseIP(remoteIp)
 	if addr == nil {
-		m.logger.Warn("cannot parse IP address", zap.String("address", r.RemoteAddr))
+		m.logger.Warn("cannot parse IP address", zap.String("address", remoteIp))
 		return false
 	}
 	var record Record
@@ -260,13 +271,13 @@ func (m *MaxmindGeolocation) Match(r *http.Request) bool {
 
 	err = m.dbInst.Lookup(addr, &record)
 	if err != nil {
-		m.logger.Warn("cannot lookup IP address", zap.String("address", r.RemoteAddr), zap.Error(err))
+		m.logger.Warn("cannot lookup IP address", zap.String("address", remoteIp), zap.Error(err))
 		return false
 	}
 
 	m.logger.Debug(
 		"Detected MaxMind data",
-		zap.String("ip", r.RemoteAddr),
+		zap.String("ip", remoteIp),
 		zap.String("country", record.Country.ISOCode),
 		zap.String("subdivisions", record.Subdivisions.CommaSeparatedISOCodes()),
 		zap.Int("metro_code", record.Location.MetroCode),
